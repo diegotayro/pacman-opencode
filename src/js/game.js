@@ -10,6 +10,14 @@ const DIRS = {
 };
 const OPPOSITE = { left: 'right', right: 'left', up: 'down', down: 'up' };
 
+// [ fase, frames que dura ]. Infinity = persecución permanente.
+const PHASE_SCHEDULE = [
+  [ 'scatter', 420 ], [ 'chase', 1200 ],
+  [ 'scatter', 420 ], [ 'chase', 1200 ],
+  [ 'scatter', 300 ], [ 'chase', 1200 ],
+  [ 'scatter', 300 ], [ 'chase', Infinity ],
+];
+
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
@@ -28,6 +36,8 @@ function createGame() {
     score: 0,
     lives: 3,
     dotsRemaining: dots,
+    phaseIndex: 0,
+    phaseFrames: 0,
     grid,
     pacman: {
       x: PACMAN_START.x,
@@ -42,6 +52,7 @@ function createGame() {
       dir: 'up',
       speed: GHOST_SPEED,
       kind: g.kind,
+      corner: g.corner,
     } ) ),
   };
 }
@@ -110,9 +121,95 @@ function movePacman( game ) {
   wrapTunnel( p, width );
 }
 
+// Objetivo del fantasma segun kind + fase. null = sin objetivo (decision al azar).
+function ghostTarget( game, g ) {
+  const p = game.pacman;
+  const phase = PHASE_SCHEDULE[ game.phaseIndex ][ 0 ];
+  if ( phase === 'scatter' ) return g.corner;
+
+  switch ( g.kind ) {
+    case 'wanderer':
+      return null;
+    case 'ambusher': {
+      const d = DIRS[ p.dir ];
+      return { x: Math.round( p.x ) + d.x * 4, y: Math.round( p.y ) + d.y * 4 };
+    }
+    case 'shy': {
+      const px = Math.round( p.x );
+      const py = Math.round( p.y );
+      const dist = Math.abs( g.x - px ) + Math.abs( g.y - py );
+      if ( dist < 8 ) {
+        // Huir: esquina mas alejada de Pac-Man entre las 4.
+        const corners = GHOST_STARTS.map( ( s ) => s.corner );
+        let far = corners[ 0 ];
+        let farDist = -1;
+        for ( const c of corners ) {
+          const d = Math.abs( c.x - px ) + Math.abs( c.y - py );
+          if ( d > farDist ) {
+            farDist = d;
+            far = c;
+          }
+        }
+        return far;
+      }
+      return { x: px, y: py };
+    }
+    default:
+      // chaser: celda de Pac-Man, resuelta con BFS en decideGhost.
+      return { x: Math.round( p.x ), y: Math.round( p.y ) };
+  }
+}
+
+// Primer paso del camino mas corto (BFS) sobre celdas transitables para ghost.
+// `forbidden` es una celda excluida (p.ej. la que el fantasma deja atras, para
+// no girar en U). Devuelve 'left' | 'right' | 'up' | 'down' o null sin ruta.
+function bfsDir( grid, from, to, forbidden ) {
+  const W = grid[ 0 ].length;
+  const startKey = from.x + ',' + from.y;
+  const goalKey = to.x + ',' + to.y;
+  if ( startKey === goalKey ) return null;
+
+  const forbKey = forbidden ? forbidden.x + ',' + forbidden.y : null;
+  const prev = new Map();
+  const visited = new Set( [ startKey ] );
+  let frontier = [ from ];
+
+  while ( frontier.length ) {
+    const next = [];
+    for ( const cur of frontier ) {
+      for ( const dir of Object.keys( DIRS ) ) {
+        const d = DIRS[ dir ];
+        let nx = cur.x + d.x;
+        let ny = cur.y + d.y;
+        if ( ny === TUNNEL_ROW ) {
+          if ( nx < 0 ) nx += W;
+          else if ( nx >= W ) nx -= W;
+        }
+        const key = nx + ',' + ny;
+        if ( visited.has( key ) || key === forbKey ) continue;
+        if ( isWall( grid, nx, ny, 'ghost' ) ) continue;
+        visited.add( key );
+        prev.set( key, { x: cur.x, y: cur.y, dir } );
+        if ( key === goalKey ) {
+          // Reconstruir el primer paso desde `from` caminando hacia atras.
+          let node = { x: nx, y: ny };
+          while ( true ) {
+            const entry = prev.get( node.x + ',' + node.y );
+            if ( entry.x === from.x && entry.y === from.y ) return entry.dir;
+            node = entry;
+          }
+        }
+        next.push( { x: nx, y: ny } );
+      }
+    }
+    frontier = next;
+  }
+  return null;
+}
+
 function decideGhost( game, g ) {
   const grid = game.grid;
-  const p = game.pacman;
+  const target = ghostTarget( game, g );
 
   const options = Object.keys( DIRS ).filter(
     ( dir ) => dir !== OPPOSITE[ g.dir ] && canMove( grid, g.x, g.y, dir, 'ghost' )
@@ -120,16 +217,25 @@ function decideGhost( game, g ) {
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
 
-  if ( g.kind === 'hunter' ) {
-    const px = Math.round( p.x );
-    const py = Math.round( p.y );
+  if ( target && g.kind === 'chaser' ) {
+    // Ruta optima real (BFS). La celda que deja atras queda excluida: nunca
+    // gira en U salvo que BFS falle y caiga al fallback de abajo.
+    const back = { x: g.x - DIRS[ g.dir ].x, y: g.y - DIRS[ g.dir ].y };
+    const step = bfsDir( grid, { x: g.x, y: g.y }, target, back );
+    if ( step && choices.indexOf( step ) !== -1 ) {
+      g.dir = step;
+      return;
+    }
+  }
+
+  if ( target ) {
     let best = choices[ 0 ];
     let bestDist = Infinity;
     for ( const dir of choices ) {
       const d = DIRS[ dir ];
       const nx = g.x + d.x;
       const ny = g.y + d.y;
-      const dist = Math.abs( nx - px ) + Math.abs( ny - py );
+      const dist = Math.abs( nx - target.x ) + Math.abs( ny - target.y );
       if ( dist < bestDist ) {
         bestDist = dist;
         best = dir;
@@ -164,6 +270,9 @@ function resetPositions( game ) {
   p.y = PACMAN_START.y;
   p.dir = 'left';
   p.nextDir = null;
+  // Al perder una vida el ciclo de fases vuelve a empezar por dispersión.
+  game.phaseIndex = 0;
+  game.phaseFrames = 0;
   game.ghosts.forEach( ( g, i ) => {
     g.x = GHOST_STARTS[ i ].x;
     g.y = GHOST_STARTS[ i ].y;
@@ -175,7 +284,17 @@ function collides( a, b ) {
   return Math.abs( a.x - b.x ) < 0.5 && Math.abs( a.y - b.y ) < 0.5;
 }
 
+function advancePhase( game ) {
+  game.phaseFrames++;
+  const duration = PHASE_SCHEDULE[ game.phaseIndex ][ 1 ];
+  if ( game.phaseFrames >= duration ) {
+    game.phaseIndex = ( game.phaseIndex + 1 ) % PHASE_SCHEDULE.length;
+    game.phaseFrames = 0;
+  }
+}
+
 function update( game ) {
+  advancePhase( game );
   movePacman( game );
   game.ghosts.forEach( ( g ) => moveGhost( game, g ) );
 
