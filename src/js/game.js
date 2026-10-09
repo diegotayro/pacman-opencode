@@ -10,6 +10,14 @@ const DIRS = {
 };
 const OPPOSITE = { left: 'right', right: 'left', up: 'down', down: 'up' };
 
+// [ fase, frames que dura ]. Infinity = persecución permanente.
+const PHASE_SCHEDULE = [
+  [ 'scatter', 420 ], [ 'chase', 1200 ],
+  [ 'scatter', 420 ], [ 'chase', 1200 ],
+  [ 'scatter', 300 ], [ 'chase', 1200 ],
+  [ 'scatter', 300 ], [ 'chase', Infinity ],
+];
+
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
@@ -28,6 +36,8 @@ function createGame() {
     score: 0,
     lives: 3,
     dotsRemaining: dots,
+    phaseIndex: 0,
+    phaseFrames: 0,
     grid,
     pacman: {
       x: PACMAN_START.x,
@@ -110,9 +120,17 @@ function movePacman( game ) {
   wrapTunnel( p, width );
 }
 
+// Objetivo del fantasma segun kind + fase. null = sin objetivo (decision al azar).
+function ghostTarget( game, g ) {
+  const p = game.pacman;
+  const phase = PHASE_SCHEDULE[ game.phaseIndex ][ 0 ];
+  if ( phase === 'scatter' ) return g.corner;
+  return { x: Math.round( p.x ), y: Math.round( p.y ) };
+}
+
 function decideGhost( game, g ) {
   const grid = game.grid;
-  const p = game.pacman;
+  const target = ghostTarget( game, g );
 
   const options = Object.keys( DIRS ).filter(
     ( dir ) => dir !== OPPOSITE[ g.dir ] && canMove( grid, g.x, g.y, dir, 'ghost' )
@@ -120,16 +138,14 @@ function decideGhost( game, g ) {
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
 
-  if ( g.kind === 'hunter' ) {
-    const px = Math.round( p.x );
-    const py = Math.round( p.y );
+  if ( target ) {
     let best = choices[ 0 ];
     let bestDist = Infinity;
     for ( const dir of choices ) {
       const d = DIRS[ dir ];
       const nx = g.x + d.x;
       const ny = g.y + d.y;
-      const dist = Math.abs( nx - px ) + Math.abs( ny - py );
+      const dist = Math.abs( nx - target.x ) + Math.abs( ny - target.y );
       if ( dist < bestDist ) {
         bestDist = dist;
         best = dir;
@@ -175,7 +191,17 @@ function collides( a, b ) {
   return Math.abs( a.x - b.x ) < 0.5 && Math.abs( a.y - b.y ) < 0.5;
 }
 
+function advancePhase( game ) {
+  game.phaseFrames++;
+  const duration = PHASE_SCHEDULE[ game.phaseIndex ][ 1 ];
+  if ( game.phaseFrames >= duration ) {
+    game.phaseIndex = ( game.phaseIndex + 1 ) % PHASE_SCHEDULE.length;
+    game.phaseFrames = 0;
+  }
+}
+
 function update( game ) {
+  advancePhase( game );
   movePacman( game );
   game.ghosts.forEach( ( g ) => moveGhost( game, g ) );
 
