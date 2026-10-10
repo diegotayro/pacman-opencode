@@ -5,6 +5,7 @@ const TILE = 20;
 const WALL_COLOR = '#2121ff';
 const DOOR_COLOR = '#ffb8ff';
 const DOT_COLOR = '#ffb897';
+const FRIGHT_COLOR = '#2121ff'; // cuerpo de los fantasmas asustados
 
 function cellCenter( x, y ) {
   return { cx: x * TILE + TILE / 2, cy: y * TILE + TILE / 2 };
@@ -79,6 +80,22 @@ function drawDots( ctx, grid ) {
   }
 }
 
+// Power pellets (tile 4): dots grandes que parpadean para avisar sin texto.
+function drawPellets( ctx, grid, frame ) {
+  ctx.fillStyle = DOT_COLOR;
+  ctx.globalAlpha = Math.floor( frame / 12 ) % 2 === 0 ? 1 : 0.4;
+  for ( let y = 0; y < grid.length; y++ ) {
+    for ( let x = 0; x < grid[ 0 ].length; x++ ) {
+      if ( grid[ y ][ x ] !== 4 ) continue;
+      const { cx, cy } = cellCenter( x, y );
+      ctx.beginPath();
+      ctx.arc( cx, cy, 5, 0, Math.PI * 2 );
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawPacman( ctx, p, frame ) {
   const { cx, cy } = cellCenter( p.x, p.y );
   let rot = 0;
@@ -98,7 +115,7 @@ function drawPacman( ctx, p, frame ) {
   ctx.fill();
 }
 
-function drawGhost( ctx, g, color ) {
+function drawGhost( ctx, g, color, frightFrames, frame ) {
   const { cx, cy } = cellCenter( g.x, g.y );
   const r = TILE / 2 - 1;
   const top = cy - r;
@@ -106,6 +123,11 @@ function drawGhost( ctx, g, color ) {
   const left = cx - r;
   const right = cx + r;
 
+  // Cuerpo: azul durante el susto; parpadea a blanco en los ultimos frames.
+  if ( g.frightened ) {
+    const blink = frightFrames <= FRIGHT_BLINK && Math.floor( frame / 8 ) % 2 === 0;
+    color = blink ? '#ffffff' : FRIGHT_COLOR;
+  }
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc( cx, cy - 1, r, Math.PI, 0, false ); // cabeza
@@ -157,8 +179,12 @@ function draw( ctx, game, frame ) {
   drawWalls( ctx, grid );
   drawDoor( ctx, grid );
   drawDots( ctx, grid );
+  drawPellets( ctx, grid, frame );
   drawPacman( ctx, game.pacman, frame );
-  game.ghosts.forEach( ( g, i ) => drawGhost( ctx, g, GHOST_COLORS[ i ] || '#ff0000' ) );
+  game.ghosts.forEach( ( g, i ) => {
+    if ( g.eatenFrames > 0 ) return; // comido: invisible hasta reaparecer
+    drawGhost( ctx, g, GHOST_COLORS[ i ] || '#ff0000', game.frightFrames, frame );
+  } );
   drawHUD( ctx, game, W );
 }
 
