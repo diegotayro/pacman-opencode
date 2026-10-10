@@ -21,6 +21,12 @@ const PHASE_SCHEDULE = [
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
+// Modo asustado (power pellets).
+const FRIGHT_FRAMES = 360;         // duracion del modo asustado (~6 s)
+const FRIGHT_BLINK = 120;          // ultimos frames con parpadeo azul/blanco
+const GHOST_RESPAWN_FRAMES = 180;  // invisible tras ser comido (~3 s)
+const PELLET_POINTS = 50;          // puntos por power pellet
+
 // Crea una partida nueva. Copia MAZE (pristino) a game.grid para poder comer
 // dots sin destruir el original, y reiniciar.
 function createGame() {
@@ -29,7 +35,7 @@ function createGame() {
   grid[ PACMAN_START.y ][ PACMAN_START.x ] = 0;
 
   let dots = 0;
-  for ( const row of grid ) for ( const v of row ) if ( v === 2 ) dots++;
+  for ( const row of grid ) for ( const v of row ) if ( v === 2 || v === 4 ) dots++;
 
   return {
     state: 'start',
@@ -38,6 +44,8 @@ function createGame() {
     dotsRemaining: dots,
     phaseIndex: 0,
     phaseFrames: 0,
+    frightFrames: 0, // 0 = normal; >0 = modo asustado, decrece cada frame
+    ghostCombo: 0,   // fantasmas comidos en el susto actual (200 * 2 ** n)
     grid,
     pacman: {
       x: PACMAN_START.x,
@@ -53,6 +61,8 @@ function createGame() {
       speed: GHOST_SPEED,
       kind: g.kind,
       corner: g.corner,
+      frightened: false, // asustado ahora mismo?
+      eatenFrames: 0,    // >0 = comido; revive en GHOST_STARTS[i] al llegar a 0
     } ) ),
   };
 }
@@ -105,11 +115,17 @@ function movePacman( game ) {
       p.dir = p.nextDir;
       p.nextDir = null;
     }
-    // Comer dot.
-    if ( grid[ p.y ][ p.x ] === 2 ) {
+    // Comer dot o power pellet (tile 4).
+    const tile = grid[ p.y ][ p.x ];
+    if ( tile === 2 || tile === 4 ) {
       grid[ p.y ][ p.x ] = 0;
-      game.score += 10;
       game.dotsRemaining--;
+      if ( tile === 4 ) {
+        game.score += PELLET_POINTS;
+        activateFright( game );
+      } else {
+        game.score += 10;
+      }
     }
     // Si no puede seguir, se detiene en la celda.
     if ( !canMove( grid, p.x, p.y, p.dir, 'pacman' ) ) return;
@@ -119,6 +135,27 @@ function movePacman( game ) {
   p.x += d.x * p.speed;
   p.y += d.y * p.speed;
   wrapTunnel( p, width );
+}
+
+// Activa (o reinicia) el modo asustado: los fantasmas visibles invierten su
+// direccion una vez y a partir de ahi deciden al azar en cada cruce.
+function activateFright( game ) {
+  game.frightFrames = FRIGHT_FRAMES;
+  game.ghostCombo = 0;
+  for ( const g of game.ghosts ) {
+    if ( g.eatenFrames > 0 ) continue; // comido: sigue invisible y revive normal
+    g.frightened = true;
+    g.dir = OPPOSITE[ g.dir ];
+  }
+}
+
+// Decrementa el modo asustado; al agotarse vuelve la IA normal (SPEC 01).
+function advanceFright( game ) {
+  if ( game.frightFrames <= 0 ) return;
+  game.frightFrames--;
+  if ( game.frightFrames === 0 ) {
+    for ( const g of game.ghosts ) g.frightened = false;
+  }
 }
 
 // Objetivo del fantasma segun kind + fase. null = sin objetivo (decision al azar).
@@ -209,13 +246,20 @@ function bfsDir( grid, from, to, forbidden ) {
 
 function decideGhost( game, g ) {
   const grid = game.grid;
-  const target = ghostTarget( game, g );
 
   const options = Object.keys( DIRS ).filter(
     ( dir ) => dir !== OPPOSITE[ g.dir ] && canMove( grid, g.x, g.y, dir, 'ghost' )
   );
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
+
+  // Asustado: decision al azar, sin objetivo (huye erratico por los pasillos).
+  if ( g.frightened ) {
+    g.dir = choices[ Math.floor( Math.random() * choices.length ) ];
+    return;
+  }
+
+  const target = ghostTarget( game, g );
 
   if ( target && g.kind === 'chaser' ) {
     // Ruta optima real (BFS). La celda que deja atras queda excluida: nunca
@@ -254,7 +298,12 @@ function moveGhost( game, g ) {
   if ( aligned( g.x ) && aligned( g.y ) ) {
     g.x = Math.round( g.x );
     g.y = Math.round( g.y );
-    decideGhost( game, g );
+    // En el mismo frame en que se activa el susto no se decide direccion: se
+    // respeta la inversion unica que acaba de hacer activateFright. En los
+    // frames siguientes (frightFrames < FRIGHT_FRAMES) ya decide al azar.
+    if ( !( g.frightened && game.frightFrames === FRIGHT_FRAMES ) ) {
+      decideGhost( game, g );
+    }
     if ( !canMove( grid, g.x, g.y, g.dir, 'ghost' ) ) return;
   }
 
@@ -262,6 +311,14 @@ function moveGhost( game, g ) {
   g.x += d.x * g.speed;
   g.y += d.y * g.speed;
   wrapTunnel( g, width );
+}
+
+// El fantasma comido reaparece en su celda de salida, ya en modo normal.
+function respawnGhost( g, i ) {
+  g.x = GHOST_STARTS[ i ].x;
+  g.y = GHOST_STARTS[ i ].y;
+  g.dir = 'up';
+  g.frightened = false;
 }
 
 function resetPositions( game ) {
@@ -273,10 +330,15 @@ function resetPositions( game ) {
   // Al perder una vida el ciclo de fases vuelve a empezar por dispersión.
   game.phaseIndex = 0;
   game.phaseFrames = 0;
+  // El susto se cancela, la racha vuelve a 0 y los fantasmas al estado inicial.
+  game.frightFrames = 0;
+  game.ghostCombo = 0;
   game.ghosts.forEach( ( g, i ) => {
     g.x = GHOST_STARTS[ i ].x;
     g.y = GHOST_STARTS[ i ].y;
     g.dir = 'up';
+    g.frightened = false;
+    g.eatenFrames = 0;
   } );
 }
 
@@ -295,19 +357,38 @@ function advancePhase( game ) {
 
 function update( game ) {
   advancePhase( game );
+  advanceFright( game );
   movePacman( game );
-  game.ghosts.forEach( ( g ) => moveGhost( game, g ) );
+  game.ghosts.forEach( ( g, i ) => {
+    if ( g.eatenFrames > 0 ) {
+      g.eatenFrames--;
+      if ( g.eatenFrames === 0 ) respawnGhost( g, i );
+      return; // comido: invisible, no se mueve hasta reaparecer
+    }
+    moveGhost( game, g );
+  } );
 
   for ( const g of game.ghosts ) {
-    if ( collides( game.pacman, g ) ) {
-      game.lives--;
-      if ( game.lives <= 0 ) {
-        game.state = 'lost';
-        return;
-      }
-      resetPositions( game );
-      break;
+    if ( g.eatenFrames > 0 ) continue; // invisible: no colisiona
+
+    if ( !collides( game.pacman, g ) ) continue;
+
+    if ( g.frightened ) {
+      // Fantasma asustado: se lo come Pac-Man. Racha del susto actual.
+      game.score += 200 * 2 ** game.ghostCombo;
+      game.ghostCombo++;
+      g.eatenFrames = GHOST_RESPAWN_FRAMES;
+      g.frightened = false;
+      continue;
     }
+
+    game.lives--;
+    if ( game.lives <= 0 ) {
+      game.state = 'lost';
+      return;
+    }
+    resetPositions( game );
+    break;
   }
 
   if ( game.dotsRemaining <= 0 ) game.state = 'won';
@@ -316,3 +397,4 @@ function update( game ) {
 window.createGame = createGame;
 window.update = update;
 window.DIRS = DIRS;
+window.FRIGHT_BLINK = FRIGHT_BLINK;
